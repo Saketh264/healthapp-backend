@@ -12,6 +12,7 @@ import os
 import shutil
 import pytesseract
 from PIL import Image
+import re
 
 # ---------------- TESSERACT CONFIG ----------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -74,6 +75,41 @@ def require_doctor(user: dict = Depends(get_current_user)):
     return user
 
 
+# ---------------- TEXT CLEANING ----------------
+def clean_text(text):
+    text = text.replace("\n", " ")
+    text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+
+# ---------------- DATA EXTRACTION ----------------
+def extract_data(text):
+    data = {}
+
+    # Medicine name
+    med = re.search(r'rx\s*:\s*([a-zA-Z ]+)', text)
+    if med:
+        data["medicine"] = med.group(1).strip()
+
+    # Dosage
+    dosage = re.search(r'\d+\s?mg', text)
+    if dosage:
+        data["dosage"] = dosage.group()
+
+    # Form (capsules/tablets)
+    form = re.search(r'(capsules|tablets)', text)
+    if form:
+        data["form"] = form.group()
+
+    # Refills
+    refill = re.search(r'refills\s*:\s*(\w+)', text)
+    if refill:
+        data["refills"] = refill.group(1)
+
+    return data
+
+
 # ---------------- ROUTES ----------------
 @app.get("/")
 def home():
@@ -83,6 +119,7 @@ def home():
 @app.post("/signup")
 def signup(data: Signup, db: Session = Depends(get_db)):
     hashed_password = pwd_context.hash(data.password)
+
     new_patient = models.Patient(
         email=data.email,
         password=hashed_password,
@@ -113,8 +150,13 @@ def doctor_signup(data: Signup, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
 
-    patient = db.query(models.Patient).filter(models.Patient.email == form_data.username).first()
-    doctor = db.query(models.Doctor).filter(models.Doctor.email == form_data.username).first()
+    patient = db.query(models.Patient).filter(
+        models.Patient.email == form_data.username
+    ).first()
+
+    doctor = db.query(models.Doctor).filter(
+        models.Doctor.email == form_data.username
+    ).first()
 
     user = patient if patient else doctor
 
@@ -126,7 +168,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
     role = "patient" if patient else "doctor"
 
-    access_token = create_access_token(data={"sub": user.email, "role": role})
+    access_token = create_access_token(
+        data={"sub": user.email, "role": role}
+    )
 
     return {
         "access_token": access_token,
@@ -155,13 +199,11 @@ def upload_report(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # ---------------- OCR PROCESSING ----------------
     extracted_text = ""
 
     try:
-        # Preprocessing for better OCR
-        image = Image.open(file_path).convert("L")  # grayscale
-        image = image.point(lambda x: 0 if x < 140 else 255)  # threshold
+        image = Image.open(file_path).convert("L")
+        image = image.point(lambda x: 0 if x < 140 else 255)
 
         extracted_text = pytesseract.image_to_string(
             image,
@@ -172,7 +214,9 @@ def upload_report(
 
     except Exception as e:
         print("OCR ERROR:", e)
-        extracted_text = ""  # Do NOT store failure message
+        extracted_text = ""
+    cleaned = clean_text(extracted_text)
+    structured = extract_data(cleaned)
 
     new_report = models.Report(
         filename=file.filename,
@@ -186,7 +230,7 @@ def upload_report(
 
     return {
         "message": "Report uploaded and OCR processed",
-        "preview": extracted_text[:200] if extracted_text else "No readable text found"
+        "preview": structured
     }
 
 
@@ -208,23 +252,19 @@ def summarize_patient_reports(
     reports = db.query(models.Report).filter(
         models.Report.patient_id == patient.id
     ).all()
-
     if not reports:
         return {"summary": "No reports available"}
 
-    # Ignore empty OCR results
     valid_texts = [
         r.extracted_text
         for r in reports
         if r.extracted_text and r.extracted_text.strip()
-    ]
-
+    ]   
     if not valid_texts:
         return {"summary": "No readable text found in reports"}
 
     combined_text = " ".join(valid_texts)
 
-    # Simple summarization (first 150 words)
     words = combined_text.split()
     summary = " ".join(words[:150])
 
