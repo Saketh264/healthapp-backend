@@ -12,7 +12,9 @@ import os
 import shutil
 import pytesseract
 from PIL import Image
-import re
+
+# 🔥 IMPORT LLM SUMMARIZER
+from app.services.summarizer import generate_summary
 
 # ---------------- TESSERACT CONFIG ----------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -73,41 +75,6 @@ def require_doctor(user: dict = Depends(get_current_user)):
     if user["role"] != "doctor":
         raise HTTPException(status_code=403, detail="Doctors only")
     return user
-
-
-# ---------------- TEXT CLEANING ----------------
-def clean_text(text):
-    text = text.replace("\n", " ")
-    text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.lower()
-
-
-# ---------------- DATA EXTRACTION ----------------
-def extract_data(text):
-    data = {}
-
-    # Medicine name
-    med = re.search(r'rx\s*:\s*([a-zA-Z ]+)', text)
-    if med:
-        data["medicine"] = med.group(1).strip()
-
-    # Dosage
-    dosage = re.search(r'\d+\s?mg', text)
-    if dosage:
-        data["dosage"] = dosage.group()
-
-    # Form (capsules/tablets)
-    form = re.search(r'(capsules|tablets)', text)
-    if form:
-        data["form"] = form.group()
-
-    # Refills
-    refill = re.search(r'refills\s*:\s*(\w+)', text)
-    if refill:
-        data["refills"] = refill.group(1)
-
-    return data
 
 
 # ---------------- ROUTES ----------------
@@ -178,7 +145,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     }
 
 
-# ---------------- UPLOAD + OCR ----------------
+# ---------------- UPLOAD + OCR + LLM ----------------
 @app.post("/upload-report")
 def upload_report(
     file: UploadFile = File(...),
@@ -215,8 +182,9 @@ def upload_report(
     except Exception as e:
         print("OCR ERROR:", e)
         extracted_text = ""
-    cleaned = clean_text(extracted_text)
-    structured = extract_data(cleaned)
+
+    # 🔥 USE LLM HERE
+    structured = generate_summary(extracted_text)
 
     new_report = models.Report(
         filename=file.filename,
@@ -252,6 +220,7 @@ def summarize_patient_reports(
     reports = db.query(models.Report).filter(
         models.Report.patient_id == patient.id
     ).all()
+
     if not reports:
         return {"summary": "No reports available"}
 
@@ -259,14 +228,15 @@ def summarize_patient_reports(
         r.extracted_text
         for r in reports
         if r.extracted_text and r.extracted_text.strip()
-    ]   
+    ]
+
     if not valid_texts:
         return {"summary": "No readable text found in reports"}
 
     combined_text = " ".join(valid_texts)
 
-    words = combined_text.split()
-    summary = " ".join(words[:150])
+    # 🔥 Use LLM here also (optional upgrade)
+    summary = generate_summary(combined_text)
 
     return {
         "patient": patient_email,
