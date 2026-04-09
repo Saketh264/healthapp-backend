@@ -4,14 +4,21 @@ import json
 from dotenv import load_dotenv
 from rapidfuzz import process
 from groq import Groq
+from pathlib import Path
 
 # ---------------- LOAD ENV ----------------
-load_dotenv()
+env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(env_path)
 
 # ---------------- INIT GROQ ----------------
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# 🔥 Known medicines list (expand anytime)
+if not GROQ_API_KEY:
+    raise ValueError("❌ GROQ_API_KEY not found in .env")
+
+client = Groq(api_key=GROQ_API_KEY)
+
+# ---------------- KNOWN MEDICINES ----------------
 KNOWN_MEDICINES = [
     "Betaloc",
     "Dorzolamide",
@@ -30,6 +37,7 @@ def clean_text(text: str):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
+
 # ---------------- NAME CORRECTION ----------------
 def correct_medicine_name(name: str):
     if not name:
@@ -42,7 +50,8 @@ def correct_medicine_name(name: str):
 
     return name
 
-# ---------------- DOCTOR + HOSPITAL EXTRACTION ----------------
+
+# ---------------- BASIC INFO EXTRACTION ----------------
 def basic_info_extraction(text):
     words = text.split()
 
@@ -60,7 +69,8 @@ def basic_info_extraction(text):
 
     return doctor, hospital
 
-# ---------------- MEDICINE EXTRACTION (FALLBACK) ----------------
+
+# ---------------- BASIC MEDICINE EXTRACTION ----------------
 def extract_medicines_basic(text):
     medicines = []
     words = text.split()
@@ -75,7 +85,7 @@ def extract_medicines_basic(text):
 
             if i + 1 < len(words):
                 freq = words[i+1].upper()
-                if freq in ["OD", "BD", "TID", "BID"]:
+                if freq in ["OD", "BD", "TID", "BID", "QD"]:
                     frequency = freq
 
             medicines.append({
@@ -85,6 +95,20 @@ def extract_medicines_basic(text):
             })
 
     return medicines
+
+
+# ---------------- SAFE JSON PARSER ----------------
+def safe_json_parse(content: str):
+    try:
+        return json.loads(content)
+    except:
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            return json.loads(content[start:end])
+        except:
+            return None
+
 
 # ---------------- GROQ LLM EXTRACTION ----------------
 def extract_with_llm(text: str):
@@ -106,8 +130,10 @@ Return ONLY JSON:
 }}
 
 Rules:
-- Return STRICT JSON only (no extra text)
-- If something missing → return empty string ""
+- STRICT JSON only
+- No explanations
+- No markdown
+- If missing → return ""
 
 Prescription:
 {text}
@@ -115,45 +141,50 @@ Prescription:
 
     try:
         response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
 
         content = response.choices[0].message.content.strip()
 
-        # 🔥 Handle bad JSON (very common in LLMs)
-        try:
-            data = json.loads(content)
-        except:
-            # Try to extract JSON substring
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            data = json.loads(content[start:end])
+        data = safe_json_parse(content)
 
-        # 🔥 Post-process correction
+        if not data:
+            return None
+
+        # Normalize medicines
         for med in data.get("medicines", []):
-            med["name"] = correct_medicine_name(med["name"])
+            med["name"] = correct_medicine_name(med.get("name", ""))
+            med["dosage"] = med.get("dosage", "")
+            med["frequency"] = med.get("frequency", "")
 
         return data
 
     except Exception as e:
-        print("GROQ ERROR:", e)
+        print("❌ GROQ ERROR:", e)
         return None
+
 
 # ---------------- FINAL SUMMARY ----------------
 def generate_summary(text: str):
+    if not text or not text.strip():
+        return {
+            "doctor_name": "",
+            "hospital_name": "",
+            "medicines": [],
+            "note": "Empty OCR text"
+        }
+
     cleaned = clean_text(text)
 
-    # ✅ Try LLM first
+    # 🔥 Try LLM first
     llm_result = extract_with_llm(cleaned)
 
     if llm_result:
         return llm_result
 
-    # 🔥 Fallback if LLM fails
+    # 🔥 Fallback
     doctor, hospital = basic_info_extraction(cleaned)
     medicines = extract_medicines_basic(cleaned)
 
@@ -163,3 +194,39 @@ def generate_summary(text: str):
         "medicines": medicines,
         "note": "Fallback extraction used"
     }
+
+def generate_readable_summary(data: dict):
+    import json
+
+    prompt = f"""
+You are a medical assistant.
+
+Convert the following structured medical data into a clear, patient-friendly summary.
+
+Guidelines:
+- Use simple English
+- Use bullet points
+- Clearly mention doctor, hospital, and medicines
+- Expand abbreviations:
+  BID = twice daily
+  TID = three times daily
+  QD = once daily
+  OD = once daily
+- Make it easy to understand for non-medical users
+
+Data:
+{json.dumps(data, indent=2)}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print("❌ SUMMARY LLM ERROR:", e)
+        return "Could not generate readable summary."

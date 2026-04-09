@@ -1,9 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
 from app.schemas import Signup
-from app.database import engine, SessionLocal
-from app import models
+from app.database import patients_collection, doctors_collection, reports_collection
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
@@ -12,15 +10,11 @@ import os
 import shutil
 import pytesseract
 from PIL import Image
-
-# 🔥 IMPORT LLM SUMMARIZER
+from app.services.report_service import save_report
 from app.services.summarizer import generate_summary
 
-# ---------------- TESSERACT CONFIG ----------------
+# ---------------- TESSERACT ----------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-# ---------------- DB INIT ----------------
-models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -31,15 +25,6 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
-
-# ---------------- DATABASE DEP ----------------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # ---------------- JWT ----------------
@@ -84,59 +69,71 @@ def home():
 
 
 @app.post("/signup")
-def signup(data: Signup, db: Session = Depends(get_db)):
+def signup(data: Signup):
     hashed_password = pwd_context.hash(data.password)
 
-    new_patient = models.Patient(
-        email=data.email,
-        password=hashed_password,
-        health_id=str(uuid.uuid4())
-    )
-
-    db.add(new_patient)
-    db.commit()
+    patients_collection.insert_one({
+        "email": data.email,
+        "password": hashed_password,
+        "health_id": str(uuid.uuid4()),
+        "role": "patient"
+    })
 
     return {"message": "Patient created"}
 
 
 @app.post("/doctor/signup")
-def doctor_signup(data: Signup, db: Session = Depends(get_db)):
+def doctor_signup(data: Signup):
     hashed_password = pwd_context.hash(data.password)
 
-    new_doctor = models.Doctor(
-        email=data.email,
-        password=hashed_password
-    )
-
-    db.add(new_doctor)
-    db.commit()
+    doctors_collection.insert_one({
+        "email": data.email,
+        "password": hashed_password,
+        "role": "doctor"
+    })
 
     return {"message": "Doctor created"}
 
 
 @app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    
+    # 🔥 Enforce email login
+    if "@" not in form_data.username:
+        raise HTTPException(
+            status_code=400,
+            detail="Please use email to login (example: saketh@gmail.com)"
+        )
 
-    patient = db.query(models.Patient).filter(
-        models.Patient.email == form_data.username
-    ).first()
+    print("LOGIN INPUT:", form_data.username)
 
-    doctor = db.query(models.Doctor).filter(
-        models.Doctor.email == form_data.username
-    ).first()
+    # 🔍 Find user
+    patient = patients_collection.find_one({"email": form_data.username})
+    doctor = doctors_collection.find_one({"email": form_data.username})
 
-    user = patient if patient else doctor
+    user = None
+    role = None
 
+    if patient:
+        user = patient
+        role = "patient"
+    elif doctor:
+        user = doctor
+        role = "doctor"
+
+    print("USER FOUND:", user)
+
+    # ❌ No user
     if not user:
         raise HTTPException(status_code=400, detail="User not found")
 
-    if not pwd_context.verify(form_data.password, user.password):
+    # ❌ Wrong password
+    if not pwd_context.verify(form_data.password, user["password"]):
         raise HTTPException(status_code=400, detail="Incorrect password")
 
-    role = "patient" if patient else "doctor"
-
+    # 🔐 Create token
     access_token = create_access_token(
-        data={"sub": user.email, "role": role}
+        data={"sub": user["email"], "role": role}
     )
 
     return {
@@ -145,18 +142,11 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     }
 
 
-# ---------------- UPLOAD + OCR + LLM ----------------
 @app.post("/upload-report")
 def upload_report(
     file: UploadFile = File(...),
     user: dict = Depends(require_patient),
-    db: Session = Depends(get_db)
 ):
-
-    patient = db.query(models.Patient).filter(
-        models.Patient.email == user["email"]
-    ).first()
-
     upload_folder = "uploads"
     os.makedirs(upload_folder, exist_ok=True)
 
@@ -181,64 +171,84 @@ def upload_report(
 
     except Exception as e:
         print("OCR ERROR:", e)
-        extracted_text = ""
 
-    # 🔥 USE LLM HERE
-    structured = generate_summary(extracted_text)
+    # ✅ Safe LLM call
+    structured = {}
+    if extracted_text.strip():
+        structured = generate_summary(extracted_text)
 
-    new_report = models.Report(
-        filename=file.filename,
-        filepath=file_path,
-        extracted_text=extracted_text,
-        patient_id=patient.id
+    # ✅ Use service
+    report_id = save_report(
+        file,
+        file_path,
+        extracted_text,
+        structured,
+        user["email"]
     )
 
-    db.add(new_report)
-    db.commit()
-
     return {
-        "message": "Report uploaded and OCR processed",
+        "message": "Report uploaded and stored",
+        "report_id": report_id,
         "preview": structured
     }
-
-
-# ---------------- DOCTOR SUMMARY ----------------
 @app.get("/doctor/summarize/{patient_email}")
 def summarize_patient_reports(
     patient_email: str,
     user: dict = Depends(require_doctor),
-    db: Session = Depends(get_db)
 ):
-
-    patient = db.query(models.Patient).filter(
-        models.Patient.email == patient_email
-    ).first()
-
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    reports = db.query(models.Report).filter(
-        models.Report.patient_id == patient.id
-    ).all()
+    # 🔍 Fetch reports
+    reports = list(reports_collection.find({
+        "patient_email": patient_email
+    }))
 
     if not reports:
         return {"summary": "No reports available"}
 
-    valid_texts = [
-        r.extracted_text
+    # 🔍 Extract structured data
+    structured_reports = [
+        r.get("structured_data")
         for r in reports
-        if r.extracted_text and r.extracted_text.strip()
+        if r.get("structured_data")
     ]
 
-    if not valid_texts:
-        return {"summary": "No readable text found in reports"}
+    if not structured_reports:
+        return {"summary": "No structured data found"}
 
-    combined_text = " ".join(valid_texts)
+    # 🔥 Combine data
+    all_medicines = []
+    doctor = ""
+    hospital = ""
 
-    # 🔥 Use LLM here also (optional upgrade)
-    summary = generate_summary(combined_text)
+    for report in structured_reports:
+        if not doctor:
+            doctor = report.get("doctor_name", "")
 
+        if not hospital:
+            hospital = report.get("hospital_name", "")
+
+        all_medicines.extend(report.get("medicines", []))
+
+    combined_data = {
+        "doctor_name": doctor,
+        "hospital_name": hospital,
+        "medicines": all_medicines
+    }
+
+    # 🔥 Generate readable summary
+    from app.services.summarizer import generate_readable_summary
+
+    summary_text = generate_readable_summary(combined_data)
+    latest_report = reports_collection.find_one(
+    {"patient_email": patient_email},
+    sort=[("created_at", -1)]
+)
+
+    if latest_report:
+        reports_collection.update_one(
+        {"_id": latest_report["_id"]},
+        {"$set": {"readable_summary": summary_text}}
+    )
     return {
         "patient": patient_email,
-        "summary": summary
+        "summary": summary_text
     }

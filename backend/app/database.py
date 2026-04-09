@@ -1,17 +1,37 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+from pathlib import Path
 
-DATABASE_URL = "sqlite:///./healthcare.db"
+# ---------------- LOAD ENV ----------------
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(env_path)
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
+# ---------------- CONFIG ----------------
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME", "healthapp")
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False
-)
+if not MONGO_URI:
+    raise ValueError("MONGO_URI not found in .env file")
 
-Base = declarative_base()
+# ---------------- CLIENT ----------------
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+
+# ---------------- VERIFY CONNECTION ----------------
+try:
+    client.admin.command("ping")
+    print("MongoDB connected successfully")
+except Exception as e:
+    print("MongoDB connection failed:", e)
+
+# ---------------- DATABASE ----------------
+db = client[DB_NAME]
+
+# ---------------- COLLECTIONS ----------------
+reports_collection = db["reports"]
+patients_collection = db["patients"]
+doctors_collection = db["doctors"]
+
+# ---------------- INDEXES ----------------
+patients_collection.create_index("email", unique=True)
+doctors_collection.create_index("email", unique=True)

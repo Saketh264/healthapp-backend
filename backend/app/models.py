@@ -1,36 +1,42 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
-from sqlalchemy.orm import relationship
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional
 from datetime import datetime
-from app.database import Base
 
 
-class Patient(Base):
-    __tablename__ = "patients"
-
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    password = Column(String)
-    health_id = Column(String)
-
-    reports = relationship("Report", back_populates="owner")
+# ---------------- PATIENT ----------------
+class Patient(BaseModel):
+    email: EmailStr
+    password: str
+    health_id: str
+    role: str = "patient"
 
 
-class Doctor(Base):
-    __tablename__ = "doctors"
+# ---------------- DOCTOR ----------------
+class Doctor(BaseModel):
+    email: EmailStr
+    password: str
+    role: str = "doctor"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    password = Column(String)
+
+# ---------------- MEDICINE ----------------
+class Medicine(BaseModel):
+    name: str
+    dosage: Optional[str] = ""
+    frequency: Optional[str] = ""
 
 
-class Report(Base):
-    __tablename__ = "reports"
+# ---------------- STRUCTURED DATA ----------------
+class ReportData(BaseModel):
+    doctor_name: Optional[str]
+    hospital_name: Optional[str]
+    medicines: List[Medicine]
 
-    id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String)
-    filepath = Column(String)
-    extracted_text = Column(Text)   # 🔥 important
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
 
-    patient_id = Column(Integer, ForeignKey("patients.id"))
-    owner = relationship("Patient", back_populates="reports")
+# ---------------- REPORT ----------------
+class Report(BaseModel):
+    filename: str
+    filepath: str
+    raw_text: str
+    structured_data: ReportData
+    patient_email: str
+    created_at: datetime = datetime.utcnow()

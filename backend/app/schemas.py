@@ -1,9 +1,13 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
+
 
 class Signup(BaseModel):
-    email: str
-    password: str
+    email: EmailStr
+    password: str = Field(..., min_length=6)
 
-class Login(BaseModel):
-    email: str
-    password: str
+    class Config:
+        str_strip_whitespace = True
+
+
+class Login(Signup):
+    pass
