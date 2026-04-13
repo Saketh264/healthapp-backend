@@ -1,23 +1,42 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.schemas import Signup
 from app.database import patients_collection, doctors_collection, reports_collection
+
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
+
 import uuid
 import os
 import shutil
 import pytesseract
 from PIL import Image
-from app.services.report_service import save_report
-from app.services.summarizer import generate_summary
+from bson import ObjectId
+from pymongo import MongoClient
+
+# ---------------- DB ----------------
+client = MongoClient("mongodb://localhost:27017")
+db = client["health_app"]
+requests_collection = db["requests"]
 
 # ---------------- TESSERACT ----------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+# ---------------- APP ----------------
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------- AUTH ----------------
 pwd_context = CryptContext(schemes=["bcrypt"])
 
 SECRET_KEY = "supersecretkey"
@@ -27,7 +46,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
-# ---------------- JWT ----------------
 def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -68,6 +86,7 @@ def home():
     return {"message": "Backend running"}
 
 
+# ---------------- AUTH ----------------
 @app.post("/signup")
 def signup(data: Signup):
     hashed_password = pwd_context.hash(data.password)
@@ -97,17 +116,9 @@ def doctor_signup(data: Signup):
 
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    
-    # 🔥 Enforce email login
     if "@" not in form_data.username:
-        raise HTTPException(
-            status_code=400,
-            detail="Please use email to login (example: saketh@gmail.com)"
-        )
+        raise HTTPException(status_code=400, detail="Use email to login")
 
-    print("LOGIN INPUT:", form_data.username)
-
-    # 🔍 Find user
     patient = patients_collection.find_one({"email": form_data.username})
     doctor = doctors_collection.find_one({"email": form_data.username})
 
@@ -121,82 +132,179 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
         user = doctor
         role = "doctor"
 
-    print("USER FOUND:", user)
-
-    # ❌ No user
     if not user:
         raise HTTPException(status_code=400, detail="User not found")
 
-    # ❌ Wrong password
     if not pwd_context.verify(form_data.password, user["password"]):
         raise HTTPException(status_code=400, detail="Incorrect password")
 
-    # 🔐 Create token
-    access_token = create_access_token(
-        data={"sub": user["email"], "role": role}
-    )
+    token = create_access_token({
+        "sub": user["email"],
+        "role": role
+    })
 
-    return {
-        "access_token": access_token,
-        "token_type": "bearer"
-    }
+    return {"access_token": token, "token_type": "bearer"}
 
 
+# ---------------- UPLOAD REPORT ----------------
 @app.post("/upload-report")
 def upload_report(
     file: UploadFile = File(...),
+    title: str = Form(...),
+    record_type: str = Form(...),
+    description: str = Form(""),
     user: dict = Depends(require_patient),
 ):
     upload_folder = "uploads"
     os.makedirs(upload_folder, exist_ok=True)
 
-    unique_filename = f"{uuid.uuid4()}_{file.filename}"
-    file_path = os.path.join(upload_folder, unique_filename)
+    filename = f"{uuid.uuid4()}_{file.filename}"
+    path = os.path.join(upload_folder, filename)
 
-    with open(file_path, "wb") as buffer:
+    with open(path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     extracted_text = ""
 
     try:
-        image = Image.open(file_path).convert("L")
+        image = Image.open(path).convert("L")
         image = image.point(lambda x: 0 if x < 140 else 255)
 
         extracted_text = pytesseract.image_to_string(
             image,
             config="--oem 3 --psm 6"
         )
+    except:
+        pass
 
-        print("OCR SUCCESS")
+    from app.services.summarizer import generate_summary
+    structured = generate_summary(extracted_text) if extracted_text.strip() else {}
 
-    except Exception as e:
-        print("OCR ERROR:", e)
+    reports_collection.insert_one({
+        "patient_email": user["email"],
+        "title": title,
+        "record_type": record_type,
+        "description": description,
+        "file_path": path,
+        "ocr_text": extracted_text,
+        "structured_data": structured,
+        "summary": structured,
+        "created_at": datetime.utcnow(),
+    })
 
-    # ✅ Safe LLM call
-    structured = {}
-    if extracted_text.strip():
-        structured = generate_summary(extracted_text)
+    return {"message": "Uploaded", "preview": structured}
 
-    # ✅ Use service
-    report_id = save_report(
-        file,
-        file_path,
-        extracted_text,
-        structured,
-        user["email"]
+
+# ---------------- PATIENT REPORTS ----------------
+@app.get("/my-reports")
+def get_reports(user: dict = Depends(require_patient)):
+    data = list(reports_collection.find({
+        "patient_email": user["email"]
+    }))
+
+    for d in data:
+        d["_id"] = str(d["_id"])
+
+    return data
+
+
+# ---------------- REQUEST ACCESS ----------------
+@app.post("/request-access")
+def request_access(
+    data: dict = Body(...),
+    user: dict = Depends(require_doctor),
+):
+    requests_collection.insert_one({
+        "doctor_email": user["email"],
+        "patient_email": data.get("patient_email"),
+        "purpose": data.get("purpose"),
+        "status": "pending"
+    })
+
+    return {"message": "Request sent"}
+
+
+# ---------------- PATIENT VIEW REQUESTS ----------------
+@app.get("/patient/requests")
+def get_patient_requests(user: dict = Depends(require_patient)):
+    data = list(requests_collection.find({
+        "patient_email": user["email"]
+    }))
+
+    for r in data:
+        r["_id"] = str(r["_id"])
+
+    return data
+
+
+# ---------------- APPROVE / REJECT ----------------
+@app.post("/request-decision/{request_id}")
+def handle_request_decision(
+    request_id: str,
+    data: dict = Body(...),   # 🔥 CHANGE HERE
+    user: dict = Depends(require_patient),
+):
+    status = data.get("status")   # 🔥 extract manually
+
+    if not status:
+        raise HTTPException(status_code=400, detail="Status required")
+
+    request = requests_collection.find_one({"_id": ObjectId(request_id)})
+
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    if request["patient_email"] != user["email"]:
+        raise HTTPException(status_code=403, detail="Not your request")
+
+    requests_collection.update_one(
+        {"_id": ObjectId(request_id)},
+        {"$set": {"status": status}}
     )
 
-    return {
-        "message": "Report uploaded and stored",
-        "report_id": report_id,
-        "preview": structured
-    }
+    return {"message": "Updated"}
+
+
+# ---------------- DOCTOR REQUESTS ----------------
+@app.get("/doctor/requests")
+def get_doctor_requests(user: dict = Depends(require_doctor)):
+    data = list(requests_collection.find({
+        "doctor_email": user["email"]
+    }))
+
+    for r in data:
+        r["_id"] = str(r["_id"])
+
+    return data
+
+
+# ---------------- DOCTOR APPROVED RECORDS ----------------
+@app.get("/doctor/approved-records")
+def get_approved_records(user: dict = Depends(require_doctor)):
+
+    approved = list(requests_collection.find({
+        "doctor_email": user["email"],
+        "status": "approved"
+    }))
+
+    patient_emails = [r["patient_email"] for r in approved]
+
+    reports = list(reports_collection.find({
+        "patient_email": {"$in": patient_emails}
+    }))
+
+    for r in reports:
+        r["_id"] = str(r["_id"])
+
+    return reports
+
+
+# ---------------- AI SUMMARY ----------------
 @app.get("/doctor/summarize/{patient_email}")
 def summarize_patient_reports(
     patient_email: str,
     user: dict = Depends(require_doctor),
 ):
-    # 🔍 Fetch reports
     reports = list(reports_collection.find({
         "patient_email": patient_email
     }))
@@ -204,7 +312,6 @@ def summarize_patient_reports(
     if not reports:
         return {"summary": "No reports available"}
 
-    # 🔍 Extract structured data
     structured_reports = [
         r.get("structured_data")
         for r in reports
@@ -214,41 +321,22 @@ def summarize_patient_reports(
     if not structured_reports:
         return {"summary": "No structured data found"}
 
-    # 🔥 Combine data
     all_medicines = []
     doctor = ""
     hospital = ""
 
     for report in structured_reports:
-        if not doctor:
-            doctor = report.get("doctor_name", "")
-
-        if not hospital:
-            hospital = report.get("hospital_name", "")
-
+        doctor = doctor or report.get("doctor_name", "")
+        hospital = hospital or report.get("hospital_name", "")
         all_medicines.extend(report.get("medicines", []))
 
-    combined_data = {
+    combined = {
         "doctor_name": doctor,
         "hospital_name": hospital,
         "medicines": all_medicines
     }
 
-    # 🔥 Generate readable summary
     from app.services.summarizer import generate_readable_summary
+    summary_text = generate_readable_summary(combined)
 
-    summary_text = generate_readable_summary(combined_data)
-    latest_report = reports_collection.find_one(
-    {"patient_email": patient_email},
-    sort=[("created_at", -1)]
-)
-
-    if latest_report:
-        reports_collection.update_one(
-        {"_id": latest_report["_id"]},
-        {"$set": {"readable_summary": summary_text}}
-    )
-    return {
-        "patient": patient_email,
-        "summary": summary_text
-    }
+    return {"patient": patient_email, "summary": summary_text}
