@@ -13,7 +13,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { FileUp, Brain, Search } from "lucide-react";
+import { FileUp } from "lucide-react";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
@@ -21,6 +21,9 @@ const PatientDashboard = () => {
   const [records, setRecords] = useState([]);
   const [requests, setRequests] = useState([]);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [selectedRecord, setSelectedRecord] = useState(null);
+
   const [file, setFile] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -31,7 +34,7 @@ const PatientDashboard = () => {
 
   const token = localStorage.getItem("token");
 
-  // 🔥 FETCH RECORDS
+  // FETCH RECORDS
   const fetchRecords = async () => {
     try {
       const res = await fetch(`${BASE_URL}/my-reports`, {
@@ -44,7 +47,7 @@ const PatientDashboard = () => {
     }
   };
 
-  // 🔥 FETCH REQUESTS
+  // FETCH REQUESTS
   const fetchRequests = async () => {
     try {
       const res = await fetch(`${BASE_URL}/patient/requests`, {
@@ -62,29 +65,25 @@ const PatientDashboard = () => {
     fetchRequests();
   }, []);
 
-  // 🔥 APPROVE / REJECT
-const handleDecision = async (id, status) => {
-  try {
-    const res = await fetch(`${BASE_URL}/request-decision/${id}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        status: status, // 🔥 explicitly send
-      }),
-    });
+  // APPROVE / REJECT
+  const handleDecision = async (id, status) => {
+    try {
+      await fetch(`${BASE_URL}/request-decision/${id}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status }),
+      });
 
-    const data = await res.json();
-    console.log("Response:", data);
+      fetchRequests();
+    } catch {
+      alert("Action failed");
+    }
+  };
 
-    fetchRequests();
-  } catch (err) {
-    console.log(err);
-  }
-};
-  // 🔥 UPLOAD
+  // UPLOAD
   const handleUpload = async () => {
     if (!file || !title || !recordType) {
       return alert("Fill all required fields");
@@ -99,24 +98,13 @@ const handleDecision = async (id, status) => {
       formData.append("record_type", recordType);
       formData.append("description", description);
 
-      const res = await fetch(`${BASE_URL}/upload-report`, {
+      await fetch(`${BASE_URL}/upload-report`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error();
-
-      const newRecord = {
-        title,
-        record_type: recordType,
-        created_at: new Date().toISOString(),
-        summary: data.preview || {},
-      };
-
-      setRecords((prev) => [newRecord, ...prev]);
-      await fetchRecords();
+      await fetchRecords(); // 🔥 IMPORTANT FIX
 
       setUploadOpen(false);
       setFile(null);
@@ -145,17 +133,12 @@ const handleDecision = async (id, status) => {
 
         {/* HEADER */}
         <div className="flex justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Patient Dashboard</h1>
-            <p className="text-muted-foreground">
-              Manage your health records
-            </p>
-          </div>
+          <h1 className="text-2xl font-bold">Patient Dashboard</h1>
 
           {/* UPLOAD */}
           <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
             <DialogTrigger asChild>
-              <Button className="gradient-primary">
+              <Button>
                 <FileUp className="w-4 h-4 mr-2" /> Upload
               </Button>
             </DialogTrigger>
@@ -165,27 +148,15 @@ const handleDecision = async (id, status) => {
                 <DialogTitle>Upload Record</DialogTitle>
               </DialogHeader>
 
-              <Input
-                placeholder="Title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
+              <Input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
 
-              <select
-                className="w-full border p-2 rounded"
-                value={recordType}
-                onChange={(e) => setRecordType(e.target.value)}
-              >
+              <select value={recordType} onChange={(e) => setRecordType(e.target.value)}>
                 <option value="">Select</option>
                 <option value="lab_report">Lab Report</option>
                 <option value="prescription">Prescription</option>
               </select>
 
-              <Textarea
-                placeholder="Description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
+              <Textarea value={description} onChange={(e) => setDescription(e.target.value)} />
 
               <input type="file" onChange={(e) => setFile(e.target.files[0])} />
 
@@ -202,7 +173,6 @@ const handleDecision = async (id, status) => {
           <TabsList>
             <TabsTrigger value="records">Records</TabsTrigger>
             <TabsTrigger value="requests">Requests</TabsTrigger>
-            <TabsTrigger value="summaries">Summaries</TabsTrigger>
           </TabsList>
 
           {/* RECORDS */}
@@ -213,65 +183,113 @@ const handleDecision = async (id, status) => {
               onChange={(e) => setSearchQuery(e.target.value)}
             />
 
-            {filteredRecords.map((r, i) => (
-              <Card key={i} className="mt-2">
-                <CardContent className="p-4 flex justify-between">
+            {filteredRecords.map((r) => (
+              <Card key={r._id} className="mt-2">
+                <CardContent className="p-4 flex justify-between items-center">
+
                   <div>
-                    <p>{r.title}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {r.record_type}
-                    </p>
+                    <p className="font-medium">{r.title}</p>
+                    <p className="text-sm text-muted-foreground">{r.record_type}</p>
+
+                    {/* 🔥 SHOW SUMMARY */}
+                    {r.readable_summary && (
+                      <pre className="text-xs mt-2 whitespace-pre-wrap text-muted-foreground">
+                        {r.readable_summary}
+                      </pre>
+                    )}
                   </div>
-                  <Badge>active</Badge>
+
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setSelectedRecord(r);
+                        setViewOpen(true);
+                      }}
+                    >
+                      View
+                    </Button>
+
+                    <Badge>active</Badge>
+                  </div>
+
                 </CardContent>
               </Card>
             ))}
           </TabsContent>
 
-          {/* 🔥 REQUESTS */}
+          {/* REQUESTS */}
           <TabsContent value="requests">
-            {requests.length === 0 ? (
-              <p>No requests</p>
-            ) : (
-              requests.map((req) => (
-                <Card key={req._id} className="mb-2">
-                  <CardContent className="p-4 flex justify-between">
-                    <div>
-                      <p>{req.doctor_email}</p>
-                      <p className="text-sm">{req.purpose}</p>
-                    </div>
+            {requests.map((req) => (
+              <Card key={req._id} className="mb-2">
+                <CardContent className="p-4 flex justify-between">
+                  <div>
+                    <p>{req.doctor_email}</p>
+                    <p className="text-sm">{req.purpose}</p>
+                  </div>
 
-                    <div className="flex gap-2">
-                      <Button onClick={() => handleDecision(req._id, "approved")}>
-                        Approve
-                      </Button>
+                  <div className="flex gap-2 items-center">
 
-                      <Button
-                        variant="destructive"
-                        onClick={() => handleDecision(req._id, "rejected")}
-                      >
-                        Reject
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))
-            )}
-          </TabsContent>
+                    {req.status === "pending" && (
+                      <>
+                        <Button onClick={() => handleDecision(req._id, "approved")}>
+                          Approve
+                        </Button>
 
-          {/* SUMMARIES */}
-          <TabsContent value="summaries">
-            {records.map((r, i) => (
-              <Card key={i} className="mb-2">
-                <CardContent className="p-4">
-                  <p>{r.title}</p>
-                  <p className="text-sm">{r.summary || "No summary"}</p>
+                        <Button
+                          variant="destructive"
+                          onClick={() => handleDecision(req._id, "rejected")}
+                        >
+                          Reject
+                        </Button>
+                      </>
+                    )}
+
+                    {req.status === "approved" && (
+                      <span className="px-3 py-1 rounded-full bg-green-100 text-green-700 text-sm">
+                        Approved
+                      </span>
+                    )}
+
+                    {req.status === "rejected" && (
+                      <span className="px-3 py-1 rounded-full bg-red-100 text-red-700 text-sm">
+                        Rejected
+                      </span>
+                    )}
+
+                  </div>
                 </CardContent>
               </Card>
             ))}
           </TabsContent>
 
         </Tabs>
+
+        {/* VIEW MODAL */}
+        <Dialog open={viewOpen} onOpenChange={setViewOpen}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Report Details</DialogTitle>
+            </DialogHeader>
+
+            {selectedRecord && (
+              <div className="space-y-4">
+
+                {selectedRecord.file_path && (
+                  <div className="max-h-[80vh] overflow-y-auto">
+                    <img
+                      src={`${BASE_URL}/${selectedRecord.file_path}`}
+                      alt="report"
+                      className="w-full object-contain rounded-md border"
+                    />
+                  </div>
+                )}
+
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
+
       </main>
     </div>
   );

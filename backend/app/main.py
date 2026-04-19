@@ -16,6 +16,8 @@ import pytesseract
 from PIL import Image
 from bson import ObjectId
 from pymongo import MongoClient
+from fastapi.staticfiles import StaticFiles
+
 
 # ---------------- DB ----------------
 client = MongoClient("mongodb://localhost:27017")
@@ -35,6 +37,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # ---------------- AUTH ----------------
 pwd_context = CryptContext(schemes=["bcrypt"])
@@ -116,9 +120,6 @@ def doctor_signup(data: Signup):
 
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    if "@" not in form_data.username:
-        raise HTTPException(status_code=400, detail="Use email to login")
-
     patient = patients_collection.find_one({"email": form_data.username})
     doctor = doctors_collection.find_one({"email": form_data.username})
 
@@ -177,8 +178,10 @@ def upload_report(
     except:
         pass
 
-    from app.services.summarizer import generate_summary
+    from app.services.summarizer import generate_summary, generate_readable_summary
+
     structured = generate_summary(extracted_text) if extracted_text.strip() else {}
+    readable_summary = generate_readable_summary(structured) if structured else ""
 
     reports_collection.insert_one({
         "patient_email": user["email"],
@@ -188,7 +191,7 @@ def upload_report(
         "file_path": path,
         "ocr_text": extracted_text,
         "structured_data": structured,
-        "summary": structured,
+        "readable_summary": readable_summary,  # 🔥 FIX
         "created_at": datetime.utcnow(),
     })
 
@@ -208,6 +211,20 @@ def get_reports(user: dict = Depends(require_patient)):
     return data
 
 
+# ---------------- NEW: SINGLE REPORT SUMMARY ----------------
+@app.get("/report-summary/{report_id}")
+def get_report_summary(report_id: str, user: dict = Depends(require_doctor)):
+    report = reports_collection.find_one({"_id": ObjectId(report_id)})
+
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return {
+        "summary": report.get("readable_summary", "No summary available"),
+        "structured": report.get("structured_data", {})
+    }
+
+
 # ---------------- REQUEST ACCESS ----------------
 @app.post("/request-access")
 def request_access(
@@ -224,7 +241,7 @@ def request_access(
     return {"message": "Request sent"}
 
 
-# ---------------- PATIENT VIEW REQUESTS ----------------
+# ---------------- PATIENT REQUESTS ----------------
 @app.get("/patient/requests")
 def get_patient_requests(user: dict = Depends(require_patient)):
     data = list(requests_collection.find({
@@ -241,21 +258,15 @@ def get_patient_requests(user: dict = Depends(require_patient)):
 @app.post("/request-decision/{request_id}")
 def handle_request_decision(
     request_id: str,
-    data: dict = Body(...),   # 🔥 CHANGE HERE
+    data: dict = Body(...),
     user: dict = Depends(require_patient),
 ):
-    status = data.get("status")   # 🔥 extract manually
-
-    if not status:
-        raise HTTPException(status_code=400, detail="Status required")
+    status = data.get("status")
 
     request = requests_collection.find_one({"_id": ObjectId(request_id)})
 
     if not request:
         raise HTTPException(status_code=404, detail="Request not found")
-
-    if request["patient_email"] != user["email"]:
-        raise HTTPException(status_code=403, detail="Not your request")
 
     requests_collection.update_one(
         {"_id": ObjectId(request_id)},
@@ -263,19 +274,6 @@ def handle_request_decision(
     )
 
     return {"message": "Updated"}
-
-
-# ---------------- DOCTOR REQUESTS ----------------
-@app.get("/doctor/requests")
-def get_doctor_requests(user: dict = Depends(require_doctor)):
-    data = list(requests_collection.find({
-        "doctor_email": user["email"]
-    }))
-
-    for r in data:
-        r["_id"] = str(r["_id"])
-
-    return data
 
 
 # ---------------- DOCTOR APPROVED RECORDS ----------------
@@ -299,7 +297,7 @@ def get_approved_records(user: dict = Depends(require_doctor)):
     return reports
 
 
-# ---------------- AI SUMMARY ----------------
+# ---------------- OVERALL SUMMARY ----------------
 @app.get("/doctor/summarize/{patient_email}")
 def summarize_patient_reports(
     patient_email: str,
@@ -309,17 +307,11 @@ def summarize_patient_reports(
         "patient_email": patient_email
     }))
 
-    if not reports:
-        return {"summary": "No reports available"}
-
     structured_reports = [
         r.get("structured_data")
         for r in reports
         if r.get("structured_data")
     ]
-
-    if not structured_reports:
-        return {"summary": "No structured data found"}
 
     all_medicines = []
     doctor = ""

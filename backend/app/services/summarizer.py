@@ -199,34 +199,46 @@ def generate_readable_summary(data: dict):
     import json
 
     prompt = f"""
-You are a medical assistant.
+You are a medical system.
 
-Convert the following structured medical data into a clear, patient-friendly summary.
+Convert the data into a STRICT structured summary.
 
-Guidelines:
-- Use simple English
-- Use bullet points
-- Clearly mention doctor, hospital, and medicines
-- Expand abbreviations:
-  BID = twice daily
-  TID = three times daily
-  QD = once daily
-  OD = once daily
-- Make it easy to understand for non-medical users
+FORMAT:
+
+Doctor: <name>
+Hospital: <name>
+
+Medications:
+- <name> - <dosage> - <frequency in simple words>
+
+Instructions:
+- <short important instruction>
+- <short important instruction>
+
+RULES:
+- NO paragraphs
+- NO storytelling
+- NO explanations
+- ONLY clean structured output
+- Keep it SHORT and PROFESSIONAL
+- Expand frequency:
+  BID → Twice daily
+  TID → Three times daily
+  QD/OD → Once daily
 
 Data:
-{json.dumps(data, indent=2)}
+{json.dumps(data)}
 """
 
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
+            temperature=0  # 🔥 IMPORTANT (no creativity)
         )
 
         return response.choices[0].message.content.strip()
 
     except Exception as e:
         print("❌ SUMMARY LLM ERROR:", e)
-        return "Could not generate readable summary."
+        return "Summary unavailable"
