@@ -7,15 +7,17 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription, // ✅ ADDED
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Send, Brain } from "lucide-react";
+import SummaryDialog from "./SummaryDialog";
 
 const API = "http://127.0.0.1:8000";
-
+  
 const DoctorDashboard = () => {
   const [records, setRecords] = useState([]);
   const [requests, setRequests] = useState([]);
@@ -30,7 +32,7 @@ const DoctorDashboard = () => {
 
   const token = localStorage.getItem("token");
 
-  // 🔥 FETCH APPROVED RECORDS (IMPORTANT CHANGE)
+  // FETCH APPROVED RECORDS
   const fetchRecords = async () => {
     try {
       const res = await fetch(`${API}/doctor/approved-records`, {
@@ -39,13 +41,12 @@ const DoctorDashboard = () => {
 
       const data = await res.json();
       setRecords(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.log(err);
+    } catch {
       setRecords([]);
     }
   };
 
-  // 🔥 FETCH MY REQUESTS
+  // FETCH REQUESTS
   const fetchRequests = async () => {
     try {
       const res = await fetch(`${API}/doctor/requests`, {
@@ -69,7 +70,7 @@ const DoctorDashboard = () => {
     load();
   }, []);
 
-  // 🔥 SEND REQUEST
+  // SEND REQUEST
   const handleRequest = async () => {
     if (!patientEmail || !purpose) {
       return alert("Fill all fields");
@@ -96,14 +97,28 @@ const DoctorDashboard = () => {
       setPurpose("");
 
       fetchRequests();
-
     } catch {
       alert("Failed");
     }
   };
 
-  // 🔥 AI SUMMARY
-  const handleSummary = async (email) => {
+  // REPORT SUMMARY
+  const handleSummary = async (reportId) => {
+    try {
+      const res = await fetch(`${API}/report-summary/${reportId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const data = await res.json();
+      setSummaryText(data.summary);
+      setSummaryOpen(true);
+    } catch {
+      alert("Failed to load summary");
+    }
+  };
+
+  // OVERALL SUMMARY
+  const handleOverallSummary = async (email) => {
     try {
       const res = await fetch(`${API}/doctor/summarize/${email}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -112,7 +127,6 @@ const DoctorDashboard = () => {
       const data = await res.json();
       setSummaryText(data.summary);
       setSummaryOpen(true);
-
     } catch {
       alert("Failed");
     }
@@ -133,7 +147,7 @@ const DoctorDashboard = () => {
             </p>
           </div>
 
-          {/* REQUEST */}
+          {/* REQUEST ACCESS */}
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
               <Button className="gradient-primary">
@@ -144,6 +158,11 @@ const DoctorDashboard = () => {
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Request Access</DialogTitle>
+
+                {/* ✅ FIXED */}
+                <DialogDescription>
+                  Enter patient email and reason to request access.
+                </DialogDescription>
               </DialogHeader>
 
               <Input
@@ -186,19 +205,30 @@ const DoctorDashboard = () => {
             ) : records.length === 0 ? (
               <p>No approved records</p>
             ) : (
-              records.map((rec, i) => (
-                <Card key={i} className="mb-2">
-                  <CardContent className="p-4 flex justify-between">
+              records.map((rec) => (
+                <Card key={rec._id} className="mb-2">
+                  <CardContent className="p-4 flex justify-between items-center">
 
                     <div>
-                      <p>{rec.title}</p>
-                      <p className="text-sm">{rec.patient_email}</p>
+                      <p className="font-medium">{rec.title}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {rec.patient_email}
+                      </p>
                     </div>
 
-                    <Button onClick={() => handleSummary(rec.patient_email)}>
-                      <Brain className="w-4 h-4 mr-1" />
-                      Summary
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button onClick={() => handleSummary(rec._id)}>
+                        <Brain className="w-4 h-4 mr-1" />
+                        Summary
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        onClick={() => handleOverallSummary(rec.patient_email)}
+                      >
+                        Overall
+                      </Button>
+                    </div>
 
                   </CardContent>
                 </Card>
@@ -226,16 +256,12 @@ const DoctorDashboard = () => {
         </Tabs>
 
         {/* SUMMARY MODAL */}
-        <Dialog open={summaryOpen} onOpenChange={setSummaryOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>AI Summary</DialogTitle>
-            </DialogHeader>
-            <div className="text-sm whitespace-pre-wrap">
-              {summaryText}
-            </div>
-          </DialogContent>
-        </Dialog>
+        <SummaryDialog
+  open={summaryOpen}
+  onOpenChange={setSummaryOpen}
+  patientLabel="Patient"
+  summary={summaryText}
+/>
 
       </main>
     </div>

@@ -196,49 +196,54 @@ def generate_summary(text: str):
     }
 
 def generate_readable_summary(data: dict):
-    import json
+    """
+    Deterministic summary (NO LLM)
+    Safe, consistent, production-ready
+    """
 
-    prompt = f"""
-You are a medical system.
+    doctor = data.get("doctor_name", "Unknown Doctor")
+    hospital = data.get("hospital_name", "Unknown Hospital")
+    medicines = data.get("medicines", [])
 
-Convert the data into a STRICT structured summary.
+    # Frequency mapping
+    freq_map = {
+        "BID": "Twice daily",
+        "BD": "Twice daily",
+        "TID": "Three times daily",
+        "QD": "Once daily",
+        "OD": "Once daily"
+    }
 
-FORMAT:
+    lines = []
 
-Doctor: <name>
-Hospital: <name>
+    # Header
+    lines.append(f"Doctor: {doctor}")
+    lines.append(f"Hospital: {hospital}")
+    lines.append("")
+    lines.append("Medications:")
 
-Medications:
-- <name> - <dosage> - <frequency in simple words>
+    if not medicines:
+        lines.append("- No medicines found")
+    else:
+        for med in medicines:
+            name = med.get("name", "Unknown")
+            dosage = med.get("dosage", "")
+            freq = med.get("frequency", "")
 
-Instructions:
-- <short important instruction>
-- <short important instruction>
+            freq_full = freq_map.get(freq.upper(), freq)
 
-RULES:
-- NO paragraphs
-- NO storytelling
-- NO explanations
-- ONLY clean structured output
-- Keep it SHORT and PROFESSIONAL
-- Expand frequency:
-  BID → Twice daily
-  TID → Three times daily
-  QD/OD → Once daily
+            line = f"- {name}"
+            if dosage:
+                line += f" - {dosage}"
+            if freq_full:
+                line += f" - {freq_full}"
 
-Data:
-{json.dumps(data)}
-"""
+            lines.append(line)
 
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0  # 🔥 IMPORTANT (no creativity)
-        )
+    # Instructions (fixed safe)
+    lines.append("")
+    lines.append("Instructions:")
+    lines.append("- Take medicines as prescribed")
+    lines.append("- Consult doctor if symptoms persist")
 
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        print("❌ SUMMARY LLM ERROR:", e)
-        return "Summary unavailable"
+    return "\n".join(lines)

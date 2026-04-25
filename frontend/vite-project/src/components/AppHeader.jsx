@@ -16,7 +16,7 @@ const AppHeader = () => {
     localStorage.removeItem("email");
     localStorage.removeItem("role");
 
-    navigate("/auth");
+    navigate("/");
   };
 
   // 🔥 IF NOT LOGGED IN

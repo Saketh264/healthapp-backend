@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
-// import AppHeader from "@/components/AppHeader";
+import AppHeader from "@/components/AppHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-// import { useToast } from "@/hooks/use-toast";
+import { useToast } from "@/hooks/use-toast";
 import { Navigate } from "react-router-dom";
 import { Loader2, Save, User } from "lucide-react";
 
